@@ -5,10 +5,10 @@
 */
 
 #include "PubSubClient.h"
+#include "ESP8266.h"
 
 PubSubClient::PubSubClient() {
    this->_client = NULL;
-   this->stream = NULL;
 }
 
 PubSubClient::PubSubClient(char* domain, uint32_t port, void(*callback)(char*,uint8_t*,unsigned int), ESP8266& wifi) {
@@ -108,7 +108,7 @@ boolean PubSubClient::connect(char *id, char *user, char *pass, char* willTopic,
 }
 
 uint32_t PubSubClient::readPacket(uint8_t* lengthLength) {
-   uint32_t len = recv(&buffer, MQTT_MAX_PACKET_SIZE);
+   uint32_t len = _client->recv(buffer, MQTT_MAX_PACKET_SIZE, 500);
    bool isPublish = (buffer[0]&0xF0) == MQTTPUBLISH;
    uint32_t multiplier = 1;
    uint16_t length = 0;
@@ -258,7 +258,8 @@ boolean PubSubClient::publish_P(char* topic, uint8_t* PROGMEM payload, unsigned 
    rc += _client->send(buffer,pos);
    
    for (i=0;i<plength;i++) {
-      rc += _client->send((char)pgm_read_byte_near(payload + i));
+	   uint8_t outByte = (uint8_t)pgm_read_byte_near(payload + i);
+      rc += _client->send(&outByte, 1);
    }
    
    lastOutActivity = millis();
