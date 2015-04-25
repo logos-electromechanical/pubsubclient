@@ -5,45 +5,17 @@
 */
 
 #include "PubSubClient.h"
-#include <string.h>
 
 PubSubClient::PubSubClient() {
    this->_client = NULL;
    this->stream = NULL;
 }
 
-PubSubClient::PubSubClient(uint8_t *ip, uint16_t port, void (*callback)(char*,uint8_t*,unsigned int), Client& client) {
-   this->_client = &client;
-   this->callback = callback;
-   this->ip = ip;
-   this->port = port;
-   this->domain = NULL;
-   this->stream = NULL;
-}
-
-PubSubClient::PubSubClient(char* domain, uint16_t port, void (*callback)(char*,uint8_t*,unsigned int), Client& client) {
-   this->_client = &client;
+PubSubClient::PubSubClient(char* domain, uint32_t port, void(*callback)(char*,uint8_t*,unsigned int), ESP8266& wifi) {
+   this->_client = &wifi;
    this->callback = callback;
    this->domain = domain;
    this->port = port;
-   this->stream = NULL;
-}
-
-PubSubClient::PubSubClient(uint8_t *ip, uint16_t port, void (*callback)(char*,uint8_t*,unsigned int), Client& client, Stream& stream) {
-   this->_client = &client;
-   this->callback = callback;
-   this->ip = ip;
-   this->port = port;
-   this->domain = NULL;
-   this->stream = &stream;
-}
-
-PubSubClient::PubSubClient(char* domain, uint16_t port, void (*callback)(char*,uint8_t*,unsigned int), Client& client, Stream& stream) {
-   this->_client = &client;
-   this->callback = callback;
-   this->domain = domain;
-   this->port = port;
-   this->stream = &stream;
 }
 
 boolean PubSubClient::connect(char *id) {
@@ -54,8 +26,7 @@ boolean PubSubClient::connect(char *id, char *user, char *pass) {
    return connect(id,user,pass,0,0,0,0);
 }
 
-boolean PubSubClient::connect(char *id, char* willTopic, uint8_t willQos, uint8_t willRetain, char* willMessage)
-{
+boolean PubSubClient::connect(char *id, char* willTopic, uint8_t willQos, uint8_t willRetain, char* willMessage) {
    return connect(id,NULL,NULL,willTopic,willQos,willRetain,willMessage);
 }
 
@@ -64,9 +35,9 @@ boolean PubSubClient::connect(char *id, char *user, char *pass, char* willTopic,
       int result = 0;
       
       if (domain != NULL) {
-        result = _client->connect(this->domain, this->port);
+        result = _client->createTCP(this->domain, this->port);
       } else {
-        result = _client->connect(this->ip, this->port);
+        return false;
       }
       
       if (result) {
@@ -115,10 +86,10 @@ boolean PubSubClient::connect(char *id, char *user, char *pass, char* willTopic,
          
          lastInActivity = lastOutActivity = millis();
          
-         while (!_client->available()) {
+         while (!Serial1.available()) {	// This is a quick hack to get this working with the Arachnio
             unsigned long t = millis();
             if (t-lastInActivity > MQTT_KEEPALIVE*1000UL) {
-               _client->stop();
+               _client->releaseTCP();
                return false;
             }
          }
@@ -131,19 +102,13 @@ boolean PubSubClient::connect(char *id, char *user, char *pass, char* willTopic,
             return true;
          }
       }
-      _client->stop();
+      _client->releaseTCP();
    }
    return false;
 }
 
-uint8_t PubSubClient::readByte() {
-   while(!_client->available()) {}
-   return _client->read();
-}
-
-uint16_t PubSubClient::readPacket(uint8_t* lengthLength) {
-   uint16_t len = 0;
-   buffer[len++] = readByte();
+uint32_t PubSubClient::readPacket(uint8_t* lengthLength) {
+   uint32_t len = recv(&buffer, MQTT_MAX_PACKET_SIZE);
    bool isPublish = (buffer[0]&0xF0) == MQTTPUBLISH;
    uint32_t multiplier = 1;
    uint16_t length = 0;
@@ -151,41 +116,16 @@ uint16_t PubSubClient::readPacket(uint8_t* lengthLength) {
    uint16_t skip = 0;
    uint8_t start = 0;
    
-   do {
-      digit = readByte();
-      buffer[len++] = digit;
-      length += (digit & 127) * multiplier;
-      multiplier *= 128;
-   } while ((digit & 128) != 0);
    *lengthLength = len-1;
 
    if (isPublish) {
       // Read in topic length to calculate bytes to skip over for Stream writing
-      buffer[len++] = readByte();
-      buffer[len++] = readByte();
       skip = (buffer[*lengthLength+1]<<8)+buffer[*lengthLength+2];
       start = 2;
       if (buffer[0]&MQTTQOS1) {
          // skip message id
          skip += 2;
       }
-   }
-
-   for (uint16_t i = start;i<length;i++) {
-      digit = readByte();
-      if (this->stream) {
-         if (isPublish && len-*lengthLength-2>skip) {
-             this->stream->write(digit);
-         }
-      }
-      if (len < MQTT_MAX_PACKET_SIZE) {
-         buffer[len] = digit;
-      }
-      len++;
-   }
-   
-   if (!this->stream && len > MQTT_MAX_PACKET_SIZE) {
-       len = 0; // This will cause the packet to be ignored.
    }
 
    return len;
@@ -196,18 +136,18 @@ boolean PubSubClient::loop() {
       unsigned long t = millis();
       if ((t - lastInActivity > MQTT_KEEPALIVE*1000UL) || (t - lastOutActivity > MQTT_KEEPALIVE*1000UL)) {
          if (pingOutstanding) {
-            _client->stop();
+            _client->releaseTCP();
             return false;
          } else {
             buffer[0] = MQTTPINGREQ;
             buffer[1] = 0;
-            _client->write(buffer,2);
+            _client->send(buffer,2);
             lastOutActivity = t;
             lastInActivity = t;
             pingOutstanding = true;
          }
       }
-      if (_client->available()) {
+      if (Serial1.available()) {	// Another brute hack to make this work with the Arachnio
          uint8_t llen;
          uint16_t len = readPacket(&llen);
          uint16_t msgId = 0;
@@ -233,7 +173,7 @@ boolean PubSubClient::loop() {
                     buffer[1] = 2;
                     buffer[2] = (msgId >> 8);
                     buffer[3] = (msgId & 0xFF);
-                    _client->write(buffer,4);
+                    _client->send(buffer,4);
                     lastOutActivity = t;
 
                   } else {
@@ -244,7 +184,7 @@ boolean PubSubClient::loop() {
             } else if (type == MQTTPINGREQ) {
                buffer[0] = MQTTPINGRESP;
                buffer[1] = 0;
-               _client->write(buffer,2);
+               _client->send(buffer,2);
             } else if (type == MQTTPINGRESP) {
                pingOutstanding = false;
             }
@@ -315,10 +255,10 @@ boolean PubSubClient::publish_P(char* topic, uint8_t* PROGMEM payload, unsigned 
    
    pos = writeString(topic,buffer,pos);
    
-   rc += _client->write(buffer,pos);
+   rc += _client->send(buffer,pos);
    
    for (i=0;i<plength;i++) {
-      rc += _client->write((char)pgm_read_byte_near(payload + i));
+      rc += _client->send((char)pgm_read_byte_near(payload + i));
    }
    
    lastOutActivity = millis();
@@ -347,7 +287,7 @@ boolean PubSubClient::write(uint8_t header, uint8_t* buf, uint16_t length) {
    for (int i=0;i<llen;i++) {
       buf[5-llen+i] = lenBuf[i];
    }
-   rc = _client->write(buf+(4-llen),length+1+llen);
+   rc = _client->send(buf+(4-llen),length+1+llen);
    
    lastOutActivity = millis();
    return (rc == 1+llen+length);
@@ -395,8 +335,8 @@ boolean PubSubClient::unsubscribe(char* topic) {
 void PubSubClient::disconnect() {
    buffer[0] = MQTTDISCONNECT;
    buffer[1] = 0;
-   _client->write(buffer,2);
-   _client->stop();
+   _client->send(buffer,2);
+   _client->releaseTCP();
    lastInActivity = lastOutActivity = millis();
 }
 
@@ -415,13 +355,16 @@ uint16_t PubSubClient::writeString(char* string, uint8_t* buf, uint16_t pos) {
 
 
 boolean PubSubClient::connected() {
-   boolean rc;
+   String ipStatus;
+   uint8_t index;
    if (_client == NULL ) {
-      rc = false;
+      return false;
    } else {
-      rc = (int)_client->connected();
-      if (!rc) _client->stop();
+	  ipStatus = _client->getIPStatus();
+	  if (ipStatus.charAt(ipStatus.indexOf(':') + 1) == '3') {
+		  return true;
+	  }
+	  return false;
    }
-   return rc;
 }
 
